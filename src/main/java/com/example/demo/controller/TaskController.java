@@ -1,55 +1,78 @@
 package com.example.demo.controller;
 
+import com.example.demo.bo.ExportTaskRequest;
 import com.example.demo.bo.TaskProgress;
-import com.example.demo.bo.TaskRequest;
+import com.example.demo.service.ExportTaskService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
-import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/tasks")
 public class TaskController {
 
+    private static final Logger log = LoggerFactory.getLogger(TaskController.class);
+
+    @Autowired
+    private ExportTaskService taskService;
+
     /**
-     * 提交任务，并立即返回 SSE 流用于监听进度
+     * 提交文件导出任务
+     * POST /api/tasks/export
      */
-    @GetMapping(value = "/submit", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<TaskProgress>> submitTask(@RequestBody TaskRequest request) {
+    @PostMapping("/export")
+    public Mono<TaskSubmissionResponse> submitExportTask(@RequestBody ExportTaskRequest request) {
+        // 提交导出任务到服务层处理
+        String taskId = taskService.submitExportTask(request);
+        log.info("任务受理成功: userId={}, taskId={}", request.userId(), taskId);
+        // 返回任务提交成功的响应信息
+        return Mono.just(new TaskSubmissionResponse(taskId, "任务已受理"));
+    }
 
-        String actualTaskId = request.taskId() != null ? request.taskId() : UUID.randomUUID().toString();
+    /**
+     * 监听用户任务进度（GET + query param）
+     * 兼容浏览器 EventSource
+     */
+    @GetMapping(value = "/progress/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<org.springframework.http.codec.ServerSentEvent<TaskProgress>> streamUserTaskProgress(
+            @RequestParam String userId) {
 
-        // 模拟异步任务处理过程：每步间隔 800ms，共 totalSteps 步
-        return Flux.range(1, request.totalSteps())
-                .delayElements(Duration.ofMillis(800))
-                .map(step -> TaskProgress.processing(
-                        actualTaskId,
-                        step,
-                        request.totalSteps(),
-                        "Processing step " + step + ": " + request.description()
-                ))
+        if (userId == null || userId.isBlank()) {
+            return Flux.error(new IllegalArgumentException("userId 不能为空"));
+        }
+
+        log.info("用户 {} 开始监听任务进度流（SSE 连接建立）", userId);
+
+        return taskService.getProgressStreamForUser(userId)
                 .map(progress -> ServerSentEvent.<TaskProgress>builder()
-                        .id(actualTaskId + "-" + progress.currentStep())
-                        .event("progress")
+                        .id(progress.taskId() + "-" + System.currentTimeMillis())
+                        .event(getEventName(progress.status()))
                         .data(progress)
                         .build())
-                .subscribeOn(Schedulers.boundedElastic()) // 在 I/O 线程池执行（模拟阻塞操作）
-                .concatWith(Mono.fromCallable(() -> {
-                    // 模拟最终结果生成（如文件路径、计算结果等）
-                    String finalResult = "Result of task '" + request.description() + "' with ID: " + actualTaskId;
-                    return TaskProgress.completed(actualTaskId, finalResult);
-                }).map(result -> ServerSentEvent.<TaskProgress>builder()
-                        .id(actualTaskId + "-done")
-                        .event("complete")
-                        .data(result)
-                        .build()))
-                .doOnError(throwable -> {
-                    // 可选：错误处理
-                });
+                // ⏱️ 自动断开：20 分钟超时
+                .take(Duration.ofMinutes(5))
+                .doOnCancel(() -> log.info("用户 {} 的 SSE 连接已断开", userId));
     }
+
+    private String getEventName(String status) {
+        return switch (status) {
+            case "completed" -> "complete";
+            case "failed" -> "error";
+            default -> "progress";
+        };
+    }
+
+    /**
+     * 任务提交响应
+     */
+    public record TaskSubmissionResponse(String taskId, String message) {}
+
+
 }
