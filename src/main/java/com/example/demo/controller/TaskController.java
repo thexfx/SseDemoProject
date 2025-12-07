@@ -41,7 +41,7 @@ public class TaskController {
      * 兼容浏览器 EventSource
      */
     @GetMapping(value = "/progress/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<org.springframework.http.codec.ServerSentEvent<TaskProgress>> streamUserTaskProgress(
+    public Flux<ServerSentEvent<TaskProgress>> streamUserTaskProgress(
             @RequestParam String userId) {
 
         if (userId == null || userId.isBlank()) {
